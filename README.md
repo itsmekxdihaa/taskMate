@@ -1,6 +1,11 @@
 # TaskMate 🌸
 
-A beautiful, feature-rich task management desktop application built with React, Electron, and Firebase.
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-blue)](https://github.com/itsmekxdihaa/taskMate)
+[![React](https://img.shields.io/badge/React-18.2-blue)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.2-blue)](https://www.typescriptlang.org/)
+[![Firebase](https://img.shields.io/badge/Firebase-Enabled-orange)](https://firebase.google.com/)
+
+A beautiful, feature-rich task management desktop application built with React, TypeScript, Electron, and Firebase.
 
 ## ✨ Features
 
@@ -33,8 +38,8 @@ A beautiful, feature-rich task management desktop application built with React, 
 
 1. **Clone the repository**:
    ```bash
-   git clone <your-repo-url>
-   cd todo-ai-desktop
+   git clone https://github.com/itsmekxdihaa/taskMate.git
+   cd taskMate
    ```
 
 2. **Install dependencies**:
@@ -44,11 +49,17 @@ A beautiful, feature-rich task management desktop application built with React, 
 
 3. **Set up Firebase** (required for full functionality):
    - Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com)
-   - Enable Authentication and Firestore
-   - Update `src/firebase.ts` with your config
+   - Enable Authentication (Email/Password) and Firestore Database
+   - Update `src/firebase.ts` with your Firebase config
+   - Set up Firestore security rules (see FIREBASE_SETUP.md for details)
    - Create Firestore indexes for tasks and sessions collections
 
-4. **Run in development mode**:
+4. **Run in development mode (Web)**:
+   ```bash
+   npx vite --config vite.config.web.ts
+   ```
+   
+   Or use the standard dev command (may include Electron):
    ```bash
    npm run dev
    ```
@@ -154,10 +165,12 @@ Create these composite indexes in your Firebase console:
 - Check that Firestore indexes are created
 - Verify you're logged in
 
-### Tasks Not Loading
-- Check Firebase connection
-- Ensure Firestore rules allow read/write
-- Verify user authentication
+### Tasks Not Loading / "Failed to load tasks"
+- Check Firebase connection and authentication
+- Ensure Firestore security rules are properly configured
+- Verify you're logged in with Firebase Auth
+- Check browser console for detailed error messages
+- See FIREBASE_SETUP.md for security rules configuration
 
 ### App Won't Start
 - Check that all dependencies are installed
