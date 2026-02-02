@@ -160,6 +160,10 @@ function Layout({ children, user, onLogout, isMusicPlaying, toggleMusic, current
            <p className="app-subtitle">Welcome, {user.name}!</p>
          </div>
         <nav className="nav-menu">
+          <NavLink to="/calendar" className="nav-link">
+            <span className="nav-icon">📅</span>
+            Calendar
+          </NavLink>
           <NavLink to="/tasks" className="nav-link">
             <span className="nav-icon">📋</span>
             Tasks
@@ -168,10 +172,10 @@ function Layout({ children, user, onLogout, isMusicPlaying, toggleMusic, current
             <span className="nav-icon">⏰</span>
             Pomodoro Timer
           </NavLink>
-                     <NavLink to="/analytics" className="nav-link">
-             <span className="nav-icon">📊</span>
-             Analytics
-           </NavLink>
+          <NavLink to="/analytics" className="nav-link">
+            <span className="nav-icon">📊</span>
+            Analytics
+          </NavLink>
         </nav>
         <div className="sidebar-footer">
                      <div className="background-switcher">
@@ -589,14 +593,50 @@ function PomodoroPage({ tasks, onAddSession }: {
   const workTime = 25 * 60 // 25 minutes
   const breakTime = 5 * 60 // 5 minutes
 
+  // Request notification permission on mount
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }, [])
 
-    if (isRunning && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft(timeLeft - 1)
-      }, 1000)
-    } else if (timeLeft === 0) {
+  function playNotificationSound(isBreakTime: boolean) {
+    // Create a simple notification sound using Web Audio API
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const oscillator = audioContext.createOscillator()
+      const gainNode = audioContext.createGain()
+      
+      oscillator.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+      
+      oscillator.frequency.value = 800
+      oscillator.type = 'sine'
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime)
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5)
+      
+      oscillator.start(audioContext.currentTime)
+      oscillator.stop(audioContext.currentTime + 0.5)
+      
+      // Also try browser notification if available
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification(isBreakTime ? 'Break Time! 🌿' : 'Work Session Complete! ✅', {
+          body: isBreakTime ? 'Time for a break!' : 'Great job! Time for a break.',
+          icon: '/favicon.ico'
+        })
+      }
+    } catch (error) {
+      console.log('Could not play notification sound:', error)
+    }
+  }
+
+  // Handle timer completion
+  useEffect(() => {
+    if (timeLeft === 0 && isRunning) {
+      setIsRunning(false)
+      playNotificationSound(isBreak)
+      
       // Session completed
       if (sessionStart) {
         onAddSession({
@@ -609,6 +649,7 @@ function PomodoroPage({ tasks, onAddSession }: {
       }
       
       // Switch between work and break
+      setTimeout(() => {
       if (isBreak) {
         setTimeLeft(workTime)
         setIsBreak(false)
@@ -616,14 +657,25 @@ function PomodoroPage({ tasks, onAddSession }: {
         setTimeLeft(breakTime)
         setIsBreak(true)
       }
-      setIsRunning(false)
       setSessionStart(null)
+      }, 100)
+    }
+  }, [timeLeft, isRunning, isBreak, selectedTask, sessionStart, onAddSession, workTime, breakTime])
+
+  // Timer countdown
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null
+
+    if (isRunning && timeLeft > 0) {
+      interval = setInterval(() => {
+        setTimeLeft(prev => prev - 1)
+      }, 1000)
     }
 
     return () => {
       if (interval) clearInterval(interval)
     }
-  }, [isRunning, timeLeft, isBreak, selectedTask, sessionStart, onAddSession])
+  }, [isRunning, timeLeft])
 
   function startTimer() {
     setIsRunning(true)
@@ -807,6 +859,313 @@ function AnalyticsPage({ tasks, sessions }: { tasks: Task[]; sessions: PomodoroS
   )
 }
 
+// ----- Calendar Page -----
+function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }: {
+  tasks: Task[];
+  onAddTask: (task: Omit<Task, 'id' | 'createdAt'>) => void;
+  onToggleTask: (id: string) => void;
+  onDeleteTask: (id: string) => void;
+  onEditTask: (id: string, task: Partial<Task>) => void;
+}) {
+  const [currentDate, setCurrentDate] = useState(new Date())
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null)
+  const [showTaskModal, setShowTaskModal] = useState(false)
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [newTask, setNewTask] = useState<{
+    title: string;
+    description: string;
+    dueDate: string;
+    urgency: "high" | "medium" | "low";
+    estimatedTime: string;
+    completed: boolean;
+  }>({
+    title: "",
+    description: "",
+    dueDate: "",
+    urgency: "medium",
+    estimatedTime: "",
+    completed: false
+  })
+
+  const year = currentDate.getFullYear()
+  const month = currentDate.getMonth()
+
+  // Get first day of month and number of days
+  const firstDay = new Date(year, month, 1).getDay()
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+
+  // Get tasks for a specific date
+  function getTasksForDate(date: Date): Task[] {
+    const dateStr = date.toISOString().split('T')[0]
+    return tasks.filter(task => {
+      if (!task.dueDate) return false
+      const taskDate = task.dueDate.split('T')[0]
+      return taskDate === dateStr
+    })
+  }
+
+  // Get tasks for selected date
+  const selectedDateTasks = selectedDate ? getTasksForDate(selectedDate) : []
+
+  // Generate calendar days
+  const calendarDays: (Date | null)[] = []
+  // Add empty cells for days before month starts
+  for (let i = 0; i < firstDay; i++) {
+    calendarDays.push(null)
+  }
+  // Add days of the month
+  for (let day = 1; day <= daysInMonth; day++) {
+    calendarDays.push(new Date(year, month, day))
+  }
+
+  function handleDateClick(date: Date) {
+    setSelectedDate(date)
+    setShowTaskModal(true)
+    setEditingTask(null)
+    setNewTask({
+      title: "",
+      description: "",
+      dueDate: date.toISOString().split('T')[0],
+      urgency: "medium",
+      estimatedTime: "",
+      completed: false
+    })
+  }
+
+  function handleAddTask(e: React.FormEvent) {
+    e.preventDefault()
+    if (!newTask.title.trim() || !newTask.dueDate) return
+
+    onAddTask({
+      title: newTask.title,
+      description: newTask.description || undefined,
+      dueDate: newTask.dueDate,
+      urgency: newTask.urgency,
+      estimatedTime: newTask.estimatedTime ? parseInt(newTask.estimatedTime) : undefined,
+      completed: false
+    })
+
+    setNewTask({
+      title: "",
+      description: "",
+      dueDate: selectedDate ? selectedDate.toISOString().split('T')[0] : "",
+      urgency: "medium",
+      estimatedTime: "",
+      completed: false
+    })
+  }
+
+  function handleEditTask(e: React.FormEvent) {
+    e.preventDefault()
+    if (!editingTask || !newTask.title.trim()) return
+
+    onEditTask(editingTask.id, {
+      title: newTask.title,
+      description: newTask.description || undefined,
+      dueDate: newTask.dueDate,
+      urgency: newTask.urgency,
+      estimatedTime: newTask.estimatedTime ? parseInt(newTask.estimatedTime) : undefined
+    })
+
+    setEditingTask(null)
+    setNewTask({
+      title: "",
+      description: "",
+      dueDate: selectedDate ? selectedDate.toISOString().split('T')[0] : "",
+      urgency: "medium",
+      estimatedTime: "",
+      completed: false
+    })
+  }
+
+  function startEdit(task: Task) {
+    setEditingTask(task)
+    setNewTask({
+      title: task.title,
+      description: task.description || "",
+      dueDate: task.dueDate || "",
+      urgency: task.urgency,
+      estimatedTime: task.estimatedTime?.toString() || "",
+      completed: task.completed
+    })
+  }
+
+  function previousMonth() {
+    setCurrentDate(new Date(year, month - 1, 1))
+  }
+
+  function nextMonth() {
+    setCurrentDate(new Date(year, month + 1, 1))
+  }
+
+  function formatDate(date: Date): string {
+    return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  }
+
+  const monthNames = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"]
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+  return (
+    <div className="calendar-page">
+      <div className="calendar-header">
+        <h1 className="page-title">📅 Calendar</h1>
+        <div className="calendar-nav">
+          <button onClick={previousMonth} className="calendar-nav-btn">‹</button>
+          <h2>{monthNames[month]} {year}</h2>
+          <button onClick={nextMonth} className="calendar-nav-btn">›</button>
+        </div>
+      </div>
+
+      <div className="calendar-container">
+        <div className="calendar-grid">
+          {/* Day headers */}
+          {dayNames.map(day => (
+            <div key={day} className="calendar-day-header">{day}</div>
+          ))}
+
+          {/* Calendar days */}
+          {calendarDays.map((date, index) => {
+            if (!date) {
+              return <div key={`empty-${index}`} className="calendar-day empty"></div>
+            }
+
+            const dayTasks = getTasksForDate(date)
+            const isToday = date.toDateString() === new Date().toDateString()
+            const isSelected = selectedDate && date.toDateString() === selectedDate.toDateString()
+
+            return (
+              <div
+                key={date.toISOString()}
+                className={`calendar-day ${isToday ? 'today' : ''} ${isSelected ? 'selected' : ''}`}
+                onClick={() => handleDateClick(date)}
+              >
+                <div className="calendar-day-number">{date.getDate()}</div>
+                {dayTasks.length > 0 && (
+                  <div className="calendar-day-tasks">
+                    {dayTasks.slice(0, 3).map(task => (
+                      <div
+                        key={task.id}
+                        className={`calendar-day-task-chip ${task.urgency} ${task.completed ? 'completed' : ''}`}
+                        title={task.title}
+                      >
+                        {task.title.length > 12 ? task.title.slice(0, 12) + '…' : task.title}
+                      </div>
+                    ))}
+                    {dayTasks.length > 3 && (
+                      <div className="calendar-task-more">+{dayTasks.length - 3} more</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Task Modal */}
+        {showTaskModal && selectedDate && (
+          <div className="calendar-modal-overlay" onClick={() => setShowTaskModal(false)}>
+            <div className="calendar-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="calendar-modal-header">
+                <h3>📅 {formatDate(selectedDate)}</h3>
+                <button className="modal-close-btn" onClick={() => setShowTaskModal(false)}>✕</button>
+              </div>
+
+              {/* Task List */}
+              <div className="calendar-task-list">
+                {selectedDateTasks.length > 0 ? (
+                  selectedDateTasks.map(task => (
+                    <div key={task.id} className="calendar-task-item">
+                      <input
+                        type="checkbox"
+                        checked={task.completed}
+                        onChange={() => onToggleTask(task.id)}
+                        className="task-checkbox"
+                      />
+                      <div className="task-content">
+                        <div className={`task-title ${task.completed ? 'completed' : ''}`}>
+                          {task.title}
+                        </div>
+                        {task.description && (
+                          <div className="task-description">{task.description}</div>
+                        )}
+                        <div className="task-meta">
+                          <span className={`urgency-badge ${task.urgency}`}>
+                            {task.urgency === 'high' ? '🔥' : task.urgency === 'medium' ? '⚡' : '🌱'} {task.urgency}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="task-actions">
+                        <button onClick={() => startEdit(task)} className="edit-btn">✏️</button>
+                        <button onClick={() => onDeleteTask(task.id)} className="delete-btn">🗑️</button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="no-tasks">No tasks for this day</p>
+                )}
+              </div>
+
+              {/* Add/Edit Task Form */}
+              <form onSubmit={editingTask ? handleEditTask : handleAddTask} className="calendar-task-form">
+                <h4>{editingTask ? 'Edit Task' : 'Add New Task'}</h4>
+                <input
+                  type="text"
+                  placeholder="Task title"
+                  value={newTask.title}
+                  onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
+                  className="task-input"
+                  required
+                />
+                <textarea
+                  placeholder="Description (optional)"
+                  value={newTask.description}
+                  onChange={(e) => setNewTask({ ...newTask, description: e.target.value })}
+                  className="task-textarea"
+                />
+                <select
+                  value={newTask.urgency}
+                  onChange={(e) => setNewTask({ ...newTask, urgency: e.target.value as "high" | "medium" | "low" })}
+                  className="task-select"
+                >
+                  <option value="high">🔥 High Priority</option>
+                  <option value="medium">⚡ Medium Priority</option>
+                  <option value="low">🌱 Low Priority</option>
+                </select>
+                <input
+                  type="number"
+                  placeholder="Estimated time (minutes)"
+                  value={newTask.estimatedTime}
+                  onChange={(e) => setNewTask({ ...newTask, estimatedTime: e.target.value })}
+                  className="task-input"
+                />
+                <div className="form-actions">
+                  {editingTask && (
+                    <button type="button" onClick={() => {
+                      setEditingTask(null)
+                      setNewTask({
+                        title: "",
+                        description: "",
+                        dueDate: selectedDate.toISOString().split('T')[0],
+                        urgency: "medium",
+                        estimatedTime: "",
+                        completed: false
+                      })
+                    }} className="cancel-btn">Cancel</button>
+                  )}
+                  <button type="submit" className="save-task-btn">
+                    {editingTask ? 'Update Task' : 'Add Task'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ----- App -----
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -857,7 +1216,7 @@ export default function App() {
         while (attempts < 10) { // Try for up to 5 seconds
           if (auth.currentUser) {
             console.log('Firebase auth ready, loading data...')
-            loadUserData()
+      loadUserData()
             return
           }
           await new Promise(resolve => setTimeout(resolve, 500))
@@ -1131,6 +1490,15 @@ export default function App() {
             <PomodoroPage 
               tasks={tasks}
               onAddSession={addSession}
+            />
+          } />
+          <Route path="/calendar" element={
+            <CalendarPage 
+              tasks={tasks}
+              onAddTask={addTask}
+              onToggleTask={toggleTask}
+              onDeleteTask={deleteTask}
+              onEditTask={editTask}
             />
           } />
           <Route path="/analytics" element={

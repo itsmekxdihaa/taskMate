@@ -21,17 +21,17 @@ Your built app is located in the `dist/` folder with these files:
 1. Push your code to GitHub/GitLab
 2. Connect your repository to Netlify
 3. Set build settings:
-   - **Build command**: `npm run build`
+   - **Build command**: `npm run build:web`
    - **Publish directory**: `dist`
 4. Deploy automatically on every push!
 
 ### ⚙️ Build Configuration
 If using Git integration, add this to your repository root:
 
-**netlify.toml**:
+**netlify.toml** (already configured):
 ```toml
 [build]
-  command = "npm run build"
+  command = "npm run build:web"
   publish = "dist"
 
 [[redirects]]
