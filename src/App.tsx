@@ -2,7 +2,19 @@
 import { useState, useEffect } from "react";
 import { HashRouter as Router, Routes, Route, NavLink, Navigate } from "react-router-dom";
 import "./App.css";
-import MusicPlayer from "./components/MusicPlayer";
+import SpotifyPlayer from "./components/SpotifyPlayer";
+import NotesPage from "./components/NotesPage";
+import Icon from "./components/Icon";
+import Logo from "./components/Logo";
+import HomePage from "./components/HomePage";
+import QuickAddBar from "./components/QuickAddBar";
+import ReminderFields, { parseReminder } from "./components/ReminderFields";
+import { enablePushReminders, refreshPushRegistration, PUSH_STATUS_EVENT, type PushStatus } from "./lib/push";
+
+// Always open the app on the Home page, even if it was last left on another page
+if (window.location.hash && window.location.hash !== "#/") {
+  window.history.replaceState(null, "", window.location.pathname + window.location.search + "#/")
+}
 import { signUp, signIn, createTask, getTasks, updateTask, deleteTask as deleteTaskFromDB, createSession, getSessions, auth } from "./firebase";
 
 // Enhanced Task type
@@ -13,9 +25,41 @@ type Task = {
   dueDate?: string;
   urgency: "high" | "medium" | "low";
   estimatedTime?: number;
+  energy?: "high" | "medium" | "low";
+  energyType?: "mental" | "physical" | "mixed";
+  dueTime?: string;
+  reminderMinutes?: number;
+  remindAt?: string;
   completed: boolean;
   completedAt?: string;
   createdAt: string;
+}
+
+const DEFAULT_DUE_TIME = "09:00"
+
+function computeRemindAt(task: Pick<Task, "dueDate" | "dueTime" | "reminderMinutes" | "completed">) {
+  if (task.completed || !task.dueDate || task.reminderMinutes === undefined) return undefined
+  const due = new Date(`${task.dueDate.slice(0, 10)}T${task.dueTime || DEFAULT_DUE_TIME}:00`)
+  if (isNaN(due.getTime())) return undefined
+  const remindAt = new Date(due.getTime() - task.reminderMinutes * 60000)
+  return remindAt.getTime() > Date.now() ? remindAt.toISOString() : undefined
+}
+
+function formatDueTime(time: string) {
+  const [h, m] = time.split(":").map(Number)
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+}
+
+const energyLabels = {
+  high: "High energy",
+  medium: "Medium energy",
+  low: "Low energy",
+}
+
+const energyTypeLabels = {
+  mental: "mental",
+  physical: "physical",
+  mixed: "mental & physical",
 }
 
 // User type for login
@@ -89,8 +133,9 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
     <div className="login-page">
       <div className="login-container">
                  <div className="login-header">
+           <div className="login-logo"><Logo size={56} /></div>
            <h1 className="login-title">TaskMate</h1>
-           <p className="login-subtitle">Your cozy task companion</p>
+           <p className="login-subtitle">Tasks, notes and focus in one place</p>
          </div>
         
         <form onSubmit={handleSubmit} className="login-form">
@@ -118,7 +163,7 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
             className="login-input"
           />
           <button type="submit" className="login-btn">
-            {isSignUp ? "Sign Up" : "Login"}
+            {isSignUp ? "Create account" : "Log in"}
           </button>
         </form>
         
@@ -126,7 +171,7 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
           onClick={() => setIsSignUp(!isSignUp)} 
           className="toggle-auth-btn"
         >
-          {isSignUp ? "Already have an account? Login" : "Don't have an account? Sign Up"}
+          {isSignUp ? "Already have an account? Log in" : "New here? Create an account"}
         </button>
       </div>
     </div>
@@ -134,14 +179,32 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
 }
 
 // ----- Layout -----
-function Layout({ children, user, onLogout, isMusicPlaying, toggleMusic, currentBackground, onBackgroundChange }: { 
+const pushStatusLabels: Record<PushStatus, string> = {
+  enabled: "Reminders are on",
+  off: "Turn on reminders",
+  blocked: "Reminders blocked",
+  unsupported: "Reminders not supported here",
+  "not-configured": "Reminders not set up yet",
+  failed: "Reminders didn't connect",
+}
+
+const pushStatusHelp: Record<PushStatus, string> = {
+  enabled: "You'll get a notification before tasks with a reminder are due, even when TaskMate is closed",
+  off: "Get notifications before tasks are due, even when TaskMate is closed",
+  blocked: "Notifications are blocked. Allow them for this site in your browser settings",
+  unsupported: "This browser doesn't support push notifications. Try Chrome, Edge or Firefox",
+  "not-configured": "Push notifications need a VAPID key in the app settings",
+  failed: "This browser couldn't connect to the push service. Click to retry, or open TaskMate in Chrome, Edge or Firefox",
+}
+
+function Layout({ children, user, onLogout, theme, onToggleTheme, pushStatus, onEnableReminders }: { 
   children: React.ReactNode; 
   user: User;
   onLogout: () => void;
-  isMusicPlaying: boolean;
-  toggleMusic: () => void;
-  currentBackground: number;
-  onBackgroundChange: (index: number) => void;
+  theme: "dark" | "light";
+  onToggleTheme: () => void;
+  pushStatus: PushStatus;
+  onEnableReminders: () => void;
 }) {
   const [sidebarHidden, setSidebarHidden] = useState(false)
 
@@ -152,63 +215,56 @@ function Layout({ children, user, onLogout, isMusicPlaying, toggleMusic, current
         onClick={() => setSidebarHidden(!sidebarHidden)}
         title={sidebarHidden ? "Show sidebar" : "Hide sidebar"}
       >
-        {sidebarHidden ? "☰" : "✕"}
+        <Icon name={sidebarHidden ? "menu" : "close"} />
       </button>
       <aside className="sidebar">
-                 <div className="logo-section">
-           <h2 className="app-title">TaskMate</h2>
-           <p className="app-subtitle">Welcome, {user.name}!</p>
-         </div>
+        <div className="logo-section">
+          <Logo size={40} />
+          <div>
+            <h2 className="app-title">TaskMate</h2>
+            <p className="app-subtitle">Welcome, {user.name}!</p>
+          </div>
+        </div>
         <nav className="nav-menu">
+          <NavLink to="/" end className="nav-link">
+            <span className="nav-icon"><Icon name="home" /></span>
+            Home
+          </NavLink>
           <NavLink to="/calendar" className="nav-link">
-            <span className="nav-icon">📅</span>
+            <span className="nav-icon"><Icon name="calendar" /></span>
             Calendar
           </NavLink>
-          <NavLink to="/tasks" className="nav-link">
-            <span className="nav-icon">📋</span>
-            Tasks
-          </NavLink>
           <NavLink to="/pomodoro" className="nav-link">
-            <span className="nav-icon">⏰</span>
+            <span className="nav-icon"><Icon name="clock" /></span>
             Pomodoro Timer
           </NavLink>
-          <NavLink to="/analytics" className="nav-link">
-            <span className="nav-icon">📊</span>
-            Analytics
+          <NavLink to="/tasks" className="nav-link">
+            <span className="nav-icon"><Icon name="tasks" /></span>
+            Tasks
           </NavLink>
         </nav>
         <div className="sidebar-footer">
-                     <div className="background-switcher">
-             <div className="background-label">Theme: {currentBackground}</div>
-             <div className="background-options">
-                               {[
-                  { num: 1, label: '🌿' },
-                  { num: 2, label: '⚫' },
-                  { num: 3, label: '🌸' },
-                  { num: 4, label: '💕' },
-                  { num: 5, label: '🖤' }
-                ].map(({ num, label }) => (
-                 <button
-                   key={num}
-                   className={`background-btn ${currentBackground === num ? 'active' : ''}`}
-                   onClick={() => onBackgroundChange(num)}
-                   title={`Theme ${num}`}
-                 >
-                   {label}
-                 </button>
-               ))}
-            </div>
-          </div>
-          <div className="music-controls">
-            <MusicPlayer isPlaying={isMusicPlaying} onToggle={toggleMusic} />
-          </div>
+          <button
+            onClick={onEnableReminders}
+            className={`theme-toggle reminders-toggle ${pushStatus}`}
+            title={pushStatusHelp[pushStatus]}
+            disabled={pushStatus !== "off" && pushStatus !== "failed"}
+          >
+            <span className="nav-icon"><Icon name="bell" /></span>
+            {pushStatusLabels[pushStatus]}
+          </button>
+          <button onClick={onToggleTheme} className="theme-toggle" title="Switch between light and dark mode">
+            <span className="nav-icon"><Icon name={theme === "dark" ? "sun" : "moon"} /></span>
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
           <button onClick={onLogout} className="logout-btn">
-            <span className="nav-icon">🚪</span>
-            Logout
+            <span className="nav-icon"><Icon name="logout" /></span>
+            Log out
           </button>
         </div>
       </aside>
       <main className="main-content">{children}</main>
+      <SpotifyPlayer />
     </div>
   );
 }
@@ -216,7 +272,7 @@ function Layout({ children, user, onLogout, isMusicPlaying, toggleMusic, current
 // ----- Tasks Page -----
 function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }: { 
   tasks: Task[];
-  onAddTask: (task: Omit<Task, 'id' | 'createdAt'>) => void;
+  onAddTask: (task: Omit<Task, 'id' | 'createdAt'>) => Promise<void>;
   onToggleTask: (id: string) => void;
   onDeleteTask: (id: string) => void;
   onEditTask: (id: string, task: Partial<Task>) => void;
@@ -225,22 +281,18 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
   const [showCompleted, setShowCompleted] = useState(false)
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
-  const [newTask, setNewTask] = useState({
+  const emptyForm = {
     title: "",
     description: "",
     dueDate: "",
-    urgency: "medium" as const,
-    estimatedTime: "",
-    completed: false
-  })
-  const [editTask, setEditTask] = useState({
-    title: "",
-    description: "",
-    dueDate: "",
+    dueTime: "",
+    reminder: "",
     urgency: "medium" as "high" | "medium" | "low",
     estimatedTime: "",
     completed: false
-  })
+  }
+  const [newTask, setNewTask] = useState(emptyForm)
+  const [editTask, setEditTask] = useState(emptyForm)
 
   const filteredTasks = tasks.filter(task => {
     if (!showCompleted && task.completed) return false
@@ -256,15 +308,15 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
 
   const urgencyOrder = ["high", "medium", "low"]
   const urgencyColors = {
-    high: "#ff6b6b",
-    medium: "#ffd93d", 
-    low: "#6bcf7f"
+    high: "#d0675f",
+    medium: "#c99a4f",
+    low: "#5f9b78"
   }
 
   const urgencyLabels = {
-    high: "🔥 High Priority",
-    medium: "⚡ Medium Priority", 
-    low: "🌱 Low Priority"
+    high: "High priority",
+    medium: "Medium priority",
+    low: "Low priority"
   }
 
   function handleAddTask(e: React.FormEvent) {
@@ -275,19 +327,14 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
       title: newTask.title,
       description: newTask.description || undefined,
       dueDate: newTask.dueDate || undefined,
+      dueTime: newTask.dueDate && newTask.dueTime ? newTask.dueTime : undefined,
+      reminderMinutes: newTask.dueDate ? parseReminder(newTask.reminder) : undefined,
       urgency: newTask.urgency,
       estimatedTime: newTask.estimatedTime ? parseInt(newTask.estimatedTime) : undefined,
       completed: false
     })
 
-    setNewTask({
-      title: "",
-      description: "",
-      dueDate: "",
-      urgency: "medium",
-      estimatedTime: "",
-      completed: false
-    })
+    setNewTask(emptyForm)
     setShowAddForm(false)
   }
 
@@ -297,6 +344,8 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
       title: task.title,
       description: task.description || "",
       dueDate: task.dueDate || "",
+      dueTime: task.dueTime || "",
+      reminder: task.reminderMinutes === undefined ? "" : String(task.reminderMinutes),
       urgency: task.urgency,
       estimatedTime: task.estimatedTime?.toString() || "",
       completed: task.completed
@@ -314,6 +363,8 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
       title: editTask.title,
       description: editTask.description || undefined,
       dueDate: editTask.dueDate || undefined,
+      dueTime: editTask.dueDate && editTask.dueTime ? editTask.dueTime : undefined,
+      reminderMinutes: editTask.dueDate ? parseReminder(editTask.reminder) : undefined,
       urgency: editTask.urgency,
       estimatedTime: editTask.estimatedTime ? parseInt(editTask.estimatedTime) : undefined,
       completed: editTask.completed
@@ -323,49 +374,36 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
     onEditTask(editingTaskId, updateData)
 
     setEditingTaskId(null)
-    setEditTask({
-      title: "",
-      description: "",
-      dueDate: "",
-      urgency: "medium",
-      estimatedTime: "",
-      completed: false
-    })
+    setEditTask(emptyForm)
   }
 
   function cancelEdit() {
     setEditingTaskId(null)
-    setEditTask({
-      title: "",
-      description: "",
-      dueDate: "",
-      urgency: "medium",
-      estimatedTime: "",
-      completed: false
-    })
+    setEditTask(emptyForm)
   }
 
   return (
     <div className="tasks-page">
       <div className="tasks-header">
-        <h1 className="page-title">📋 Your Tasks</h1>
+        <h1 className="page-title">Tasks</h1>
         <div className="tasks-controls">
-                     <button 
-             onClick={() => setShowAddForm(!showAddForm)}
-             className="add-task-btn"
-           >
-             Add New Task
-           </button>
+          <button 
+            onClick={() => setShowAddForm(!showAddForm)}
+            className="add-task-btn"
+          >
+            <Icon name="plus" size={16} /> More options
+          </button>
           <div className="filter-controls">
             <select 
               value={filter} 
               onChange={(e) => setFilter(e.target.value as any)}
               className="filter-select"
+              title="Show tasks by priority"
             >
-              <option value="all">All Priorities</option>
-              <option value="high">High Priority</option>
-              <option value="medium">Medium Priority</option>
-              <option value="low">Low Priority</option>
+              <option value="all">All priorities</option>
+              <option value="high">High priority only</option>
+              <option value="medium">Medium priority only</option>
+              <option value="low">Low priority only</option>
             </select>
             <label className="show-completed">
               <input
@@ -378,6 +416,8 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
           </div>
         </div>
       </div>
+
+      <QuickAddBar onAddTask={onAddTask} />
 
       {showAddForm && (
         <div className="add-task-form">
@@ -426,8 +466,14 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
                 min="1"
               />
             </div>
+            <ReminderFields
+              dueDate={newTask.dueDate}
+              dueTime={newTask.dueTime}
+              reminder={newTask.reminder}
+              onChange={(updates) => setNewTask(prev => ({ ...prev, ...updates }))}
+            />
             <div className="form-actions">
-              <button type="submit" className="save-task-btn">Save Task</button>
+              <button type="submit" className="save-task-btn">Save task</button>
               <button 
                 type="button" 
                 onClick={() => setShowAddForm(false)}
@@ -442,7 +488,7 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
 
       {editingTaskId && (
         <div className="edit-task-form">
-          <h3>Edit Task</h3>
+          <h3>Edit task</h3>
           <form onSubmit={handleEditTask}>
             <div className="form-row">
               <input
@@ -488,8 +534,14 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
                 min="1"
               />
             </div>
+            <ReminderFields
+              dueDate={editTask.dueDate}
+              dueTime={editTask.dueTime}
+              reminder={editTask.reminder}
+              onChange={(updates) => setEditTask(prev => ({ ...prev, ...updates }))}
+            />
             <div className="form-actions">
-              <button type="submit" className="save-task-btn">Update Task</button>
+              <button type="submit" className="save-task-btn">Save changes</button>
               <button 
                 type="button" 
                 onClick={cancelEdit}
@@ -531,17 +583,29 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
                       <div className="task-meta">
                         {task.dueDate && (
                           <span className="task-due">
-                            📅 Due: {new Date(task.dueDate).toLocaleDateString()}
+                            Due {new Date(task.dueDate.slice(0, 10) + "T00:00:00").toLocaleDateString()}
+                            {task.dueTime && ` at ${formatDueTime(task.dueTime)}`}
+                          </span>
+                        )}
+                        {task.remindAt && !task.completed && (
+                          <span className="task-reminder" title={`Reminder at ${new Date(task.remindAt).toLocaleString()}`}>
+                            Reminder {new Date(task.remindAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
                           </span>
                         )}
                         {task.estimatedTime && (
                           <span className="task-time">
-                            ⏱️ {task.estimatedTime} min
+                            About {task.estimatedTime} min
+                          </span>
+                        )}
+                        {task.energy && (
+                          <span className={`energy-badge ${task.energy}`}>
+                            {energyLabels[task.energy]}
+                            {task.energyType && ` · ${energyTypeLabels[task.energyType]}`}
                           </span>
                         )}
                         {task.completed && task.completedAt && (
                           <span className="task-completed">
-                            ✅ Completed: {new Date(task.completedAt).toLocaleDateString()}
+                            Done {new Date(task.completedAt).toLocaleDateString()}
                           </span>
                         )}
                       </div>
@@ -551,15 +615,17 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
                         onClick={() => startEditTask(task)}
                         className="edit-btn"
                         title="Edit task"
+                        aria-label="Edit task"
                       >
-                        ✏️
+                        <Icon name="edit" size={16} />
                       </button>
                       <button 
                         onClick={() => onDeleteTask(task.id)}
                         className="delete-btn"
                         title="Delete task"
+                        aria-label="Delete task"
                       >
-                        🗑️
+                        <Icon name="trash" size={16} />
                       </button>
                     </div>
                   </div>
@@ -571,7 +637,7 @@ function TasksPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask }:
         
         {filteredTasks.length === 0 && (
           <div className="empty-state">
-            <p>✨ No tasks found. Add your first task to get started!</p>
+            <p>No tasks yet.</p>
           </div>
         )}
       </div>
@@ -621,9 +687,9 @@ function PomodoroPage({ tasks, onAddSession }: {
       
       // Also try browser notification if available
       if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification(isBreakTime ? 'Break Time! 🌿' : 'Work Session Complete! ✅', {
-          body: isBreakTime ? 'Time for a break!' : 'Great job! Time for a break.',
-          icon: '/favicon.ico'
+        new Notification(isBreakTime ? 'Break is over' : 'Focus session complete', {
+          body: isBreakTime ? 'Ready to start your next focus session?' : 'Nice work. Time for a short break.',
+          icon: `${import.meta.env.BASE_URL}logo.svg`
         })
       }
     } catch (error) {
@@ -704,43 +770,43 @@ function PomodoroPage({ tasks, onAddSession }: {
   return (
     <div className="pomodoro-page">
       <div className="pomodoro-header">
-                 <h1 className="page-title pomodoro-title">Pomodoro Timer</h1>
-                 
+        <h1 className="page-title pomodoro-title">Pomodoro Timer</h1>
       </div>
 
       <div className="pomodoro-container">
         <div className="timer-display">
           <div className={`timer-circle ${isBreak ? 'break' : 'work'}`}>
             <div className="timer-time">{formatTime(timeLeft)}</div>
-                         <div className="timer-label">
-               {isBreak ? '🌿 Break Time' : ''}
-             </div>
+            <div className="timer-label">
+              {isBreak ? 'Break' : 'Focus'}
+            </div>
           </div>
         </div>
 
         <div className="timer-controls">
           {!isRunning ? (
             <button onClick={startTimer} className="start-btn">
-              ▶️ Start Session
+              <Icon name="play" size={16} /> Start
             </button>
           ) : (
             <button onClick={pauseTimer} className="pause-btn">
-              ⏸️ Pause
+              <Icon name="pause" size={16} /> Pause
             </button>
           )}
           <button onClick={resetTimer} className="reset-btn">
-            🔄 Reset
+            <Icon name="reset" size={16} /> Reset
           </button>
         </div>
 
-                 <div className="task-selection">
-           
+        <div className="task-selection">
+          <label className="task-selection-label" htmlFor="focus-task">Working on</label>
           <select
+            id="focus-task"
             value={selectedTask || ""}
-                         onChange={(e) => setSelectedTask(e.target.value || null)}
+            onChange={(e) => setSelectedTask(e.target.value || null)}
             className="task-select"
           >
-            <option value="">No specific task</option>
+            <option value="">Nothing specific</option>
             {pendingTasks.map(task => (
               <option key={task.id} value={task.id}>
                 {task.title}
@@ -749,17 +815,6 @@ function PomodoroPage({ tasks, onAddSession }: {
           </select>
         </div>
 
-        <div className="pomodoro-info">
-          <div className="info-card">
-            <h4>📚 How it works:</h4>
-            <ul>
-              <li>Work for 25 minutes, then take a 5-minute break</li>
-              <li>After 4 work sessions, take a longer 15-minute break</li>
-              <li>Choose a task to focus on during your work session</li>
-              <li>Track your productivity and focus time</li>
-            </ul>
-          </div>
-        </div>
       </div>
     </div>
   )
@@ -782,72 +837,71 @@ function AnalyticsPage({ tasks, sessions }: { tasks: Task[]; sessions: PomodoroS
   return (
     <div className="analytics-page">
       <div className="analytics-header">
-        <h1 className="page-title">📊 Task Analytics</h1>
-        <p className="page-subtitle">Track your productivity and progress</p>
+        <h1 className="page-title">Progress</h1>
       </div>
 
       <div className="stats-grid">
         <div className="stat-card">
           <div className="stat-number">{tasks.length}</div>
-          <div className="stat-label">Total Tasks</div>
+          <div className="stat-label">All tasks</div>
         </div>
         <div className="stat-card">
           <div className="stat-number">{completedTasks.length}</div>
-          <div className="stat-label">Completed</div>
+          <div className="stat-label">Done</div>
         </div>
         <div className="stat-card">
           <div className="stat-number">{pendingTasks.length}</div>
-          <div className="stat-label">Pending</div>
+          <div className="stat-label">Still to do</div>
         </div>
         <div className="stat-card">
           <div className="stat-number">{highPriorityTasks.length}</div>
-          <div className="stat-label">High Priority</div>
+          <div className="stat-label">High priority, not done</div>
         </div>
       </div>
 
       <div className="progress-section">
-        <h3>Progress Overview</h3>
+        <h3>Tasks completed</h3>
         <div className="progress-bar">
           <div 
             className="progress-fill" 
             style={{ width: `${completionRate}%` }}
           ></div>
         </div>
-        <p className="progress-text">{completionRate.toFixed(1)}% Complete</p>
+        <p className="progress-text">{completionRate.toFixed(0)}% of your tasks are done</p>
       </div>
 
       <div className="time-section">
-        <h3>Time Tracking</h3>
+        <h3>Time</h3>
         <div className="time-stats">
           <div className="time-stat">
-            <span className="time-label">Total Estimated Time:</span>
-            <span className="time-value">{totalTime} minutes</span>
+            <span className="time-label">Estimated time for all tasks</span>
+            <span className="time-value">{totalTime} min</span>
           </div>
           <div className="time-stat">
-            <span className="time-label">Completed Time:</span>
-            <span className="time-value">{completedTime} minutes</span>
+            <span className="time-label">Estimated time for finished tasks</span>
+            <span className="time-value">{completedTime} min</span>
           </div>
           <div className="time-stat">
-            <span className="time-label">Pomodoro Sessions:</span>
+            <span className="time-label">Focus sessions completed</span>
             <span className="time-value">{completedSessions.length}</span>
           </div>
           <div className="time-stat">
-            <span className="time-label">Total Focus Time:</span>
-            <span className="time-value">{totalPomodoroTime} minutes</span>
+            <span className="time-label">Time spent in focus sessions</span>
+            <span className="time-value">{totalPomodoroTime} min</span>
           </div>
         </div>
       </div>
 
       <div className="recent-activity">
-        <h3>Recent Activity</h3>
+        <h3>Recently finished</h3>
         <div className="activity-list">
           {completedTasks
             .sort((a, b) => new Date(b.completedAt || "").getTime() - new Date(a.completedAt || "").getTime())
             .slice(0, 5)
             .map(task => (
               <div key={task.id} className="activity-item">
-                <span className="activity-icon">✅</span>
-                <span className="activity-text">Completed: {task.title}</span>
+                <span className="activity-icon"><Icon name="check" size={16} /></span>
+                <span className="activity-text">{task.title}</span>
                 <span className="activity-time">
                   {task.completedAt && new Date(task.completedAt).toLocaleDateString()}
                 </span>
@@ -875,6 +929,8 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
     title: string;
     description: string;
     dueDate: string;
+    dueTime: string;
+    reminder: string;
     urgency: "high" | "medium" | "low";
     estimatedTime: string;
     completed: boolean;
@@ -882,10 +938,25 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
     title: "",
     description: "",
     dueDate: "",
+    dueTime: "",
+    reminder: "",
     urgency: "medium",
     estimatedTime: "",
     completed: false
   })
+
+  function blankTaskFor(date: Date | null) {
+    return {
+      title: "",
+      description: "",
+      dueDate: date ? date.toISOString().split('T')[0] : "",
+      dueTime: "",
+      reminder: "",
+      urgency: "medium" as const,
+      estimatedTime: "",
+      completed: false
+    }
+  }
 
   const year = currentDate.getFullYear()
   const month = currentDate.getMonth()
@@ -922,14 +993,7 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
     setSelectedDate(date)
     setShowTaskModal(true)
     setEditingTask(null)
-    setNewTask({
-      title: "",
-      description: "",
-      dueDate: date.toISOString().split('T')[0],
-      urgency: "medium",
-      estimatedTime: "",
-      completed: false
-    })
+    setNewTask(blankTaskFor(date))
   }
 
   function handleAddTask(e: React.FormEvent) {
@@ -940,19 +1004,14 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
       title: newTask.title,
       description: newTask.description || undefined,
       dueDate: newTask.dueDate,
+      dueTime: newTask.dueTime || undefined,
+      reminderMinutes: parseReminder(newTask.reminder),
       urgency: newTask.urgency,
       estimatedTime: newTask.estimatedTime ? parseInt(newTask.estimatedTime) : undefined,
       completed: false
     })
 
-    setNewTask({
-      title: "",
-      description: "",
-      dueDate: selectedDate ? selectedDate.toISOString().split('T')[0] : "",
-      urgency: "medium",
-      estimatedTime: "",
-      completed: false
-    })
+    setNewTask(blankTaskFor(selectedDate))
   }
 
   function handleEditTask(e: React.FormEvent) {
@@ -963,19 +1022,14 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
       title: newTask.title,
       description: newTask.description || undefined,
       dueDate: newTask.dueDate,
+      dueTime: newTask.dueTime || undefined,
+      reminderMinutes: parseReminder(newTask.reminder),
       urgency: newTask.urgency,
       estimatedTime: newTask.estimatedTime ? parseInt(newTask.estimatedTime) : undefined
     })
 
     setEditingTask(null)
-    setNewTask({
-      title: "",
-      description: "",
-      dueDate: selectedDate ? selectedDate.toISOString().split('T')[0] : "",
-      urgency: "medium",
-      estimatedTime: "",
-      completed: false
-    })
+    setNewTask(blankTaskFor(selectedDate))
   }
 
   function startEdit(task: Task) {
@@ -984,6 +1038,8 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
       title: task.title,
       description: task.description || "",
       dueDate: task.dueDate || "",
+      dueTime: task.dueTime || "",
+      reminder: task.reminderMinutes === undefined ? "" : String(task.reminderMinutes),
       urgency: task.urgency,
       estimatedTime: task.estimatedTime?.toString() || "",
       completed: task.completed
@@ -1009,11 +1065,11 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
   return (
     <div className="calendar-page">
       <div className="calendar-header">
-        <h1 className="page-title">📅 Calendar</h1>
+        <h1 className="page-title">Calendar</h1>
         <div className="calendar-nav">
-          <button onClick={previousMonth} className="calendar-nav-btn">‹</button>
+          <button onClick={previousMonth} className="calendar-nav-btn" title="Previous month" aria-label="Previous month">‹</button>
           <h2>{monthNames[month]} {year}</h2>
-          <button onClick={nextMonth} className="calendar-nav-btn">›</button>
+          <button onClick={nextMonth} className="calendar-nav-btn" title="Next month" aria-label="Next month">›</button>
         </div>
       </div>
 
@@ -1067,8 +1123,10 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
           <div className="calendar-modal-overlay" onClick={() => setShowTaskModal(false)}>
             <div className="calendar-modal" onClick={(e) => e.stopPropagation()}>
               <div className="calendar-modal-header">
-                <h3>📅 {formatDate(selectedDate)}</h3>
-                <button className="modal-close-btn" onClick={() => setShowTaskModal(false)}>✕</button>
+                <h3>{formatDate(selectedDate)}</h3>
+                <button className="modal-close-btn" onClick={() => setShowTaskModal(false)} aria-label="Close">
+                  <Icon name="close" size={16} />
+                </button>
               </div>
 
               {/* Task List */}
@@ -1091,24 +1149,28 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
                         )}
                         <div className="task-meta">
                           <span className={`urgency-badge ${task.urgency}`}>
-                            {task.urgency === 'high' ? '🔥' : task.urgency === 'medium' ? '⚡' : '🌱'} {task.urgency}
+                            {task.urgency} priority
                           </span>
                         </div>
                       </div>
                       <div className="task-actions">
-                        <button onClick={() => startEdit(task)} className="edit-btn">✏️</button>
-                        <button onClick={() => onDeleteTask(task.id)} className="delete-btn">🗑️</button>
+                        <button onClick={() => startEdit(task)} className="edit-btn" title="Edit task" aria-label="Edit task">
+                          <Icon name="edit" size={16} />
+                        </button>
+                        <button onClick={() => onDeleteTask(task.id)} className="delete-btn" title="Delete task" aria-label="Delete task">
+                          <Icon name="trash" size={16} />
+                        </button>
                       </div>
                     </div>
                   ))
                 ) : (
-                  <p className="no-tasks">No tasks for this day</p>
+                  <p className="no-tasks">Nothing planned.</p>
                 )}
               </div>
 
               {/* Add/Edit Task Form */}
               <form onSubmit={editingTask ? handleEditTask : handleAddTask} className="calendar-task-form">
-                <h4>{editingTask ? 'Edit Task' : 'Add New Task'}</h4>
+                <h4>{editingTask ? 'Edit task' : 'New task'}</h4>
                 <input
                   type="text"
                   placeholder="Task title"
@@ -1128,9 +1190,9 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
                   onChange={(e) => setNewTask({ ...newTask, urgency: e.target.value as "high" | "medium" | "low" })}
                   className="task-select"
                 >
-                  <option value="high">🔥 High Priority</option>
-                  <option value="medium">⚡ Medium Priority</option>
-                  <option value="low">🌱 Low Priority</option>
+                  <option value="high">High priority</option>
+                  <option value="medium">Medium priority</option>
+                  <option value="low">Low priority</option>
                 </select>
                 <input
                   type="number"
@@ -1139,22 +1201,21 @@ function CalendarPage({ tasks, onAddTask, onToggleTask, onDeleteTask, onEditTask
                   onChange={(e) => setNewTask({ ...newTask, estimatedTime: e.target.value })}
                   className="task-input"
                 />
+                <ReminderFields
+                  dueDate={newTask.dueDate}
+                  dueTime={newTask.dueTime}
+                  reminder={newTask.reminder}
+                  onChange={(updates) => setNewTask(prev => ({ ...prev, ...updates }))}
+                />
                 <div className="form-actions">
                   {editingTask && (
                     <button type="button" onClick={() => {
                       setEditingTask(null)
-                      setNewTask({
-                        title: "",
-                        description: "",
-                        dueDate: selectedDate.toISOString().split('T')[0],
-                        urgency: "medium",
-                        estimatedTime: "",
-                        completed: false
-                      })
+                      setNewTask(blankTaskFor(selectedDate))
                     }} className="cancel-btn">Cancel</button>
                   )}
                   <button type="submit" className="save-task-btn">
-                    {editingTask ? 'Update Task' : 'Add Task'}
+                    {editingTask ? 'Save changes' : 'Add task'}
                   </button>
                 </div>
               </form>
@@ -1171,8 +1232,69 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
   const [sessions, setSessions] = useState<PomodoroSession[]>([])
-  const [isMusicPlaying, setIsMusicPlaying] = useState(false)
-  const [currentBackground, setCurrentBackground] = useState(1)
+  const [theme, setTheme] = useState<"dark" | "light">(
+    () => (localStorage.getItem('taskmate-theme') as "dark" | "light") || "dark"
+  )
+  const [pushStatus, setPushStatus] = useState<PushStatus>("off")
+
+  useEffect(() => {
+    if (!user) return
+    refreshPushRegistration().then(setPushStatus)
+  }, [user?.id])
+
+  useEffect(() => {
+    const onStatus = (e: Event) => setPushStatus((e as CustomEvent<PushStatus>).detail)
+    window.addEventListener(PUSH_STATUS_EVENT, onStatus)
+    return () => window.removeEventListener(PUSH_STATUS_EVENT, onStatus)
+  }, [])
+
+  async function handleEnableReminders() {
+    try {
+      await enablePushReminders()
+    } catch (error: any) {
+      console.error('Could not turn on reminders:', error)
+      alert('Could not turn on reminders: ' + (error.message || 'Unknown error'))
+    }
+  }
+
+  function getLocalDateKey(date: Date): string {
+    const year = date.getFullYear()
+    const month = `${date.getMonth() + 1}`.padStart(2, "0")
+    const day = `${date.getDate()}`.padStart(2, "0")
+    return `${year}-${month}-${day}`
+  }
+
+  function getTaskDateKey(dateValue?: string): string | null {
+    if (!dateValue) return null
+    return dateValue.split("T")[0]
+  }
+
+  async function moveOverdueTasksToToday(loadedTasks: Task[]) {
+    const todayKey = getLocalDateKey(new Date())
+    const overdueTasks = loadedTasks.filter(task => {
+      if (task.completed) return false
+      const dueDateKey = getTaskDateKey(task.dueDate)
+      if (!dueDateKey) return false
+      return dueDateKey < todayKey
+    })
+
+    if (overdueTasks.length === 0) return
+
+    console.log(`Auto-rescheduling ${overdueTasks.length} overdue task(s) to today`)
+
+    await Promise.all(
+      overdueTasks.map(task =>
+        updateTask(task.id, { dueDate: todayKey })
+      )
+    )
+
+    setTasks(prev =>
+      prev.map(task => {
+        const isOverdue = overdueTasks.some(overdueTask => overdueTask.id === task.id)
+        return isOverdue ? { ...task, dueDate: todayKey } : task
+      })
+    )
+  }
 
   // Load user from localStorage on mount and check Firebase auth state
   useEffect(() => {
@@ -1202,10 +1324,10 @@ export default function App() {
     return () => unsubscribe()
   }, [])
 
-  // Set initial background
   useEffect(() => {
-    document.body.setAttribute('data-background', '1')
-  }, [])
+    document.body.setAttribute('data-theme', theme)
+    localStorage.setItem('taskmate-theme', theme)
+  }, [theme])
 
   // Load user data when user changes
   useEffect(() => {
@@ -1260,17 +1382,25 @@ export default function App() {
       const userSessions = await getSessions(userId)
       console.log('Loaded sessions:', userSessions)
       
-      setTasks(userTasks.map((dbTask: any) => ({
+      const mappedTasks = userTasks.map((dbTask: any) => ({
         id: dbTask.id,
         title: dbTask.title,
         description: dbTask.description,
         dueDate: dbTask.dueDate,
         urgency: dbTask.urgency,
         estimatedTime: dbTask.estimatedTime,
+        energy: dbTask.energy,
+        energyType: dbTask.energyType,
+        dueTime: dbTask.dueTime,
+        reminderMinutes: dbTask.reminderMinutes,
+        remindAt: dbTask.remindAt,
         completed: dbTask.completed,
         completedAt: dbTask.completedAt,
         createdAt: dbTask.createdAt
-      })))
+      }))
+
+      setTasks(mappedTasks)
+      await moveOverdueTasksToToday(mappedTasks)
 
       setSessions(userSessions.map((dbSession: any) => ({
         id: dbSession.id,
@@ -1322,12 +1452,6 @@ export default function App() {
     }))
   }, [])
 
-  // Update body background when currentBackground changes
-  useEffect(() => {
-    console.log('Changing background to:', currentBackground)
-    document.body.setAttribute('data-background', currentBackground.toString())
-  }, [currentBackground])
-
   function handleLogin(user: User) {
     setUser(user)
     localStorage.setItem('taskmate-user', JSON.stringify(user))
@@ -1351,6 +1475,11 @@ export default function App() {
         dueDate: taskData.dueDate,
         urgency: taskData.urgency,
         estimatedTime: taskData.estimatedTime,
+        energy: taskData.energy,
+        energyType: taskData.energyType,
+        dueTime: taskData.dueTime,
+        reminderMinutes: taskData.reminderMinutes,
+        remindAt: computeRemindAt(taskData),
         completed: taskData.completed,
         completedAt: taskData.completedAt
       })
@@ -1368,21 +1497,16 @@ export default function App() {
       const task = tasks.find(t => t.id === id)
       if (!task) return
 
-      await updateTask(id, {
-        completed: !task.completed,
-        completedAt: !task.completed ? new Date().toISOString() : undefined
-      })
+      const completed = !task.completed
+      const changes = {
+        completed,
+        completedAt: completed ? new Date().toISOString() : undefined,
+        remindAt: computeRemindAt({ ...task, completed })
+      }
 
-      setTasks(prev => prev.map(task => {
-        if (task.id === id) {
-          return {
-            ...task,
-            completed: !task.completed,
-            completedAt: !task.completed ? new Date().toISOString() : undefined
-          }
-        }
-        return task
-      }))
+      await updateTask(id, changes)
+
+      setTasks(prev => prev.map(t => (t.id === id ? { ...t, ...changes } : t)))
     } catch (error) {
       console.error('Error toggling task:', error)
     }
@@ -1409,6 +1533,11 @@ export default function App() {
         throw new Error('Please log in to update tasks')
       }
       
+      const existing = tasks.find(t => t.id === id)
+      if (existing) {
+        updates = { ...updates, remindAt: computeRemindAt({ ...existing, ...updates }) }
+      }
+
       await updateTask(id, updates)
       
       setTasks(prev => prev.map(task => {
@@ -1457,10 +1586,6 @@ export default function App() {
     }
   }
 
-  function toggleMusic() {
-    setIsMusicPlaying(!isMusicPlaying)
-  }
-
   if (!user) {
     return <LoginPage onLogin={handleLogin} />
   }
@@ -1470,13 +1595,14 @@ export default function App() {
              <Layout 
           user={user} 
           onLogout={handleLogout} 
-          isMusicPlaying={isMusicPlaying} 
-          toggleMusic={toggleMusic}
-          currentBackground={currentBackground}
-          onBackgroundChange={setCurrentBackground}
+          theme={theme}
+          onToggleTheme={() => setTheme(prev => prev === "dark" ? "light" : "dark")}
+          pushStatus={pushStatus}
+          onEnableReminders={handleEnableReminders}
         >
         <Routes>
-          <Route path="/" element={<Navigate to="/tasks" replace />} />
+          <Route path="/" element={<HomePage userName={user.name} tasks={tasks} onAddTask={addTask} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
           <Route path="/tasks" element={
             <TasksPage 
               tasks={tasks} 
@@ -1486,6 +1612,7 @@ export default function App() {
               onEditTask={editTask}
             />
           } />
+          <Route path="/notes" element={<NotesPage userId={user.id} onAddTask={addTask} />} />
           <Route path="/pomodoro" element={
             <PomodoroPage 
               tasks={tasks}

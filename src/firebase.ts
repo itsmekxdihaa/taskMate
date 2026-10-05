@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, where, orderBy, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, deleteField, doc, query, where, orderBy, serverTimestamp } from 'firebase/firestore';
 
 // Your Firebase config - replace these with your actual Firebase project values
 const firebaseConfig = {
@@ -96,9 +96,9 @@ export const getTasks = async (userId: string) => {
 
 export const updateTask = async (taskId: string, updates: any) => {
   try {
-    // Filter out undefined values before sending to Firebase
+    // Firestore rejects undefined, so a field explicitly set to undefined is removed instead
     const cleanUpdates = Object.fromEntries(
-      Object.entries(updates).filter(([_, value]) => value !== undefined)
+      Object.entries(updates).map(([key, value]) => [key, value === undefined ? deleteField() : value])
     );
     
     console.log('Updating task:', taskId, 'with:', cleanUpdates);
@@ -172,6 +172,53 @@ export const getSessions = async (userId: string) => {
       id: doc.id,
       ...doc.data()
     }));
+  } catch (error: any) {
+    throw new Error(error.message);
+  }
+};
+
+export const createNote = async (noteData: { userId: string; title: string; content: string }) => {
+  try {
+    const now = new Date().toISOString();
+    const docRef = await addDoc(collection(db, 'notes'), {
+      ...noteData,
+      createdAt: now,
+      updatedAt: now
+    });
+    return { id: docRef.id, ...noteData, createdAt: now, updatedAt: now };
+  } catch (error: any) {
+    throw new Error(error.message);
+  }
+};
+
+export const getNotes = async (userId: string) => {
+  try {
+    // Sorted client-side so no composite Firestore index is needed
+    const q = query(collection(db, 'notes'), where('userId', '==', userId));
+    const querySnapshot = await getDocs(q);
+    return querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+  } catch (error: any) {
+    throw new Error(error.message);
+  }
+};
+
+export const updateNote = async (noteId: string, updates: { title: string; content: string }) => {
+  try {
+    const updatedAt = new Date().toISOString();
+    await updateDoc(doc(db, 'notes', noteId), { ...updates, updatedAt });
+    return updatedAt;
+  } catch (error: any) {
+    throw new Error(error.message);
+  }
+};
+
+export const deleteNote = async (noteId: string) => {
+  try {
+    await deleteDoc(doc(db, 'notes', noteId));
+    return true;
   } catch (error: any) {
     throw new Error(error.message);
   }
