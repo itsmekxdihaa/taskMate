@@ -18,8 +18,9 @@
   status = 200
 
 [build.environment]
-  NODE_VERSION = "18"
-  NPM_VERSION = "9"
+  # firebase-admin requires Node 22+
+  NODE_VERSION = "22"
+  ELECTRON_SKIP_BINARY_DOWNLOAD = "1"
 
 [[headers]]
   for = "/*"

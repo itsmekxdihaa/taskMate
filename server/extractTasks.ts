@@ -33,6 +33,8 @@ export function getAiConfig(env: Record<string, string | undefined>): AiConfig {
 const GEMINI_FALLBACK_MODELS = ['gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
 // Overloaded (503), rate limited (429) or transient server errors are worth trying on another model
 const RETRYABLE_STATUSES = new Set([429, 500, 503, 504])
+// Netlify's free plan stops functions after 10s, so all model attempts must fit inside this
+const GEMINI_TOTAL_BUDGET_MS = 9000
 
 class GeminiError extends Error {
   constructor(message: string, public status: number) {
@@ -42,10 +44,13 @@ class GeminiError extends Error {
 
 async function callGemini(ai: AiConfig, userMessage: string): Promise<string> {
   const models = [ai.model, ...GEMINI_FALLBACK_MODELS.filter(m => m !== ai.model)]
+  const deadline = Date.now() + GEMINI_TOTAL_BUDGET_MS
   let lastError: unknown
   for (const model of models) {
+    const remaining = deadline - Date.now()
+    if (remaining < 1000) break
     try {
-      return await callGeminiModel(ai.apiKey as string, model, userMessage)
+      return await callGeminiModel(ai.apiKey as string, model, userMessage, remaining)
     } catch (error) {
       lastError = error
       if (!(error instanceof GeminiError) || !RETRYABLE_STATUSES.has(error.status)) throw error
@@ -59,11 +64,12 @@ async function callGemini(ai: AiConfig, userMessage: string): Promise<string> {
   )
 }
 
-async function callGeminiModel(apiKey: string, model: string, userMessage: string): Promise<string> {
+async function callGeminiModel(apiKey: string, model: string, userMessage: string, timeoutMs: number): Promise<string> {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
     {
       method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
@@ -71,7 +77,10 @@ async function callGeminiModel(apiKey: string, model: string, userMessage: strin
         generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
       }),
     }
-  )
+  ).catch(error => {
+    if (error?.name === 'TimeoutError') throw new GeminiError(`Gemini ${model} timed out`, 504)
+    throw error
+  })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new GeminiError(data?.error?.message || `Gemini request failed (${res.status})`, res.status)
   return (data.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('')
